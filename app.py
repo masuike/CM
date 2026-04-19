@@ -2,15 +2,16 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import os
+import base64
+from io import BytesIO
 from openai import OpenAI
+from PIL import Image
 
 # =====================
 # 🔐 初期設定
 # =====================
 PASSWORD = os.getenv("APP_PASSWORD", "test123")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-DATA_DIR = "data"
-if not os.path.exists(DATA_DIR): os.makedirs(DATA_DIR)
 
 if "auth" not in st.session_state:
     st.session_state.auth = False
@@ -47,7 +48,6 @@ def init_db():
                 building_name TEXT,
                 building_rule TEXT DEFAULT '',
                 project_rule TEXT DEFAULT '',
-                master_content TEXT DEFAULT '',
                 UNIQUE(project_name, building_name)
             )
         """)
@@ -58,29 +58,44 @@ def init_db():
 
 init_db()
 
-def ask_ai(messages):
-    try:
-        res = client.chat.completions.create(model="gpt-4o", messages=messages, temperature=0.1)
-        return res.choices[0].message.content
-    except: return "AIエラーが発生しました"
+# =====================
+# 👁️ 画像解析関数
+# =====================
+def analyze_with_vision(image, prompt):
+    buffered = BytesIO()
+    image.save(buffered, format="PNG")
+    img_str = base64.b64encode(buffered.getvalue()).decode()
+   
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": [
+                {"type": "text", "text": "この手順書の画像からリスクを抽出してください。"},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_str}"}}
+            ]}
+        ],
+        temperature=0.1
+    )
+    return response.choices[0].message.content
+
+def ask_ai_text(messages):
+    res = client.chat.completions.create(model="gpt-4o", messages=messages, temperature=0.1)
+    return res.choices[0].message.content
 
 # =====================
 # UI
 # =====================
-st.title("🏗️ 施工管理AIツール (コピペ解析版)")
+st.title("🏗️ 施工管理AIツール (ハイブリッド版)")
 
 col1, col2 = st.columns([1, 2])
-
-# --- 共通データの取得 ---
-with get_db() as conn:
-    c_set = conn.execute("SELECT common_rule FROM company_settings WHERE id = 1").fetchone()
-    current_co_rule = c_set["common_rule"] if c_set else ""
-    acc_rows = conn.execute("SELECT * FROM accidents").fetchall()
-    acc_context = "\n".join([f"・{r['content']}" for r in acc_rows])
 
 # --- 左カラム ---
 with col1:
     with st.expander("🏢 企業共通ルール"):
+        with get_db() as conn:
+            c_set = conn.execute("SELECT common_rule FROM company_settings WHERE id = 1").fetchone()
+            current_co_rule = c_set["common_rule"] if c_set else ""
         co_v = st.text_area("全案件共通", current_co_rule, height=80)
         if st.button("企業ルール保存"):
             with get_db() as conn:
@@ -88,20 +103,38 @@ with col1:
                 conn.commit()
             st.success("保存完了")
 
-    st.subheader("🆕 案件選択")
+    st.subheader("🆕 案件管理")
+   
+    # 新規案件登録フォーム
+    with st.expander("➕ 新規案件を登録する"):
+        new_b = st.text_input("ビル名 (例: 芝浦センター)")
+        new_p = st.text_input("案件名 (例: 2F盤改造工事)")
+        if st.button("新規登録"):
+            if new_b and new_p:
+                try:
+                    with get_db() as conn:
+                        conn.execute("INSERT INTO projects (building_name, project_name) VALUES (?, ?)", (new_b, new_p))
+                        conn.commit()
+                    st.success(f"{new_p} を登録したよ！")
+                    st.rerun()
+                except:
+                    st.error("その組み合わせは既に登録されているよ。")
+   
+    # 既存案件の選択
     with get_db() as conn:
         all_p = conn.execute("SELECT id, building_name, project_name FROM projects").fetchall()
   
     p_data = None
     if all_p:
         p_options = {f"{r['building_name']} / {r['project_name']}": r['id'] for r in all_p}
-        sel_label = st.selectbox("案件を選んでね", list(p_options.keys()))
+        sel_label = st.selectbox("案件を選択", list(p_options.keys()))
         p_id = p_options[sel_label]
         with get_db() as conn:
             p_data = conn.execute("SELECT * FROM projects WHERE id = ?", (p_id,)).fetchone()
-        br_v = st.text_area("🏙️ ビル固有ルール", p_data["building_rule"], key=f"br_{p_id}", height=120)
-        pr_v = st.text_area("🚧 案件固有ルール", p_data["project_rule"], key=f"pr_{p_id}", height=120)
-        if st.button("案件ルール保存"):
+       
+        br_v = st.text_area("🏙️ ビル固有ルール", p_data["building_rule"], key=f"br_{p_id}", height=100)
+        pr_v = st.text_area("🚧 案件固有ルール", p_data["project_rule"], key=f"pr_{p_id}", height=100)
+        if st.button("この案件ルールを保存"):
             with get_db() as conn:
                 conn.execute("UPDATE projects SET building_rule=?, project_rule=? WHERE id=?", (br_v, pr_v, p_id))
                 conn.commit()
@@ -109,47 +142,51 @@ with col1:
 
 # --- 右カラム ---
 with col2:
-    tabs = st.tabs(["📊 手順書コピペ解析", "⚠️ 事故DB"])
+    tabs = st.tabs(["📊 手順書解析", "⚠️ 事故DB"])
   
     with tabs[0]:
-        st.subheader("📝 手順書テキスト貼り付け")
-        st.write("PDFを全選択(Ctrl+A)して、下の枠に貼り付けてね。")
-       
-        # テキスト入力エリア
-        manual_text = st.text_area("ここに手順書の内容を貼り付け", height=300, placeholder="11. 緊急連絡先... 14. 作業手順...")
-       
-        if st.button("🚀 プロの視点で精査開始"):
-            if not manual_text:
-                st.warning("テキストを貼り付けてからボタンを押してね。")
-            else:
-                with st.status("AI監督が内容を徹底チェック中..."):
-                    sys_p = f"""あなたは熟練の施工管理技士です。
-貼り付けられた「手順書テキスト」から、現場でトラブルになりそうなポイントを厳しく指摘してください。
+        st.subheader("🔍 解析方法を選んでね")
+        mode = st.radio("解析モード", ["画像（スクショ等）で解析", "テキスト貼り付けで解析"], horizontal=True)
 
-【1. 指標】
-・緊急連絡先（AE社、電力、防災センター等）の具体的な番号があるか？
-・作業開始・終了時間の記載があるか？
-・「分電盤OFF/ブレーカー開放」の際に、負荷側（PC、サーバー、設備）への停電周知や影響確認の記述があるか？
+        sys_p = f"""あなたは熟練の施工管理技士です。
+【チェック項目】
+・緊急連絡先（AE社等）の有無
+・作業時間の記載
+・分電盤OFF時の負荷側（サーバー等）への周知・影響確認
 
-【2. ルール照合】
-・共通ルール：{current_co_rule}
-・案件ルール：{p_data['building_rule'] if p_data else ''} / {p_data['project_rule'] if p_data else ''}
-※「2階」の作業なら「5階」のルールは無視するなど、場所の整合性も見てください。
-
-【3. 出力】
-不備やリスクがあれば【⚠️警告】、改善案は【🔍技術的注意点】として出力してください。
+【参照ルール】
+・企業共通：{current_co_rule}
+・案件別：{p_data['building_rule'] if p_data else ''} / {p_data['project_rule'] if p_data else ''}
 """
-                    ans = ask_ai([{"role":"system", "content":sys_p}, {"role":"user", "content":f"手順書テキスト:\n{manual_text}"}])
-                    st.session_state.auto_analysis = ans
-                st.success("精査完了！")
 
-        if "auto_analysis" in st.session_state:
-            st.info("💡 **AI精査結果**")
-            st.markdown(st.session_state.auto_analysis)
-            if st.button("クリア"):
-                del st.session_state.auto_analysis
+        if mode == "画像（スクショ等）で解析":
+            st.write("手順書の画像をアップロードするか、クリップボードから貼り付けてね。")
+            up_img = st.file_uploader("画像を選択", type=["png", "jpg", "jpeg"])
+            if up_img:
+                img = Image.open(up_img)
+                st.image(img, caption="解析対象の画像", use_container_width=True)
+                if st.button("🚀 画像からリスクを抽出"):
+                    with st.status("AIが画像を目視確認中..."):
+                        ans = analyze_with_vision(img, sys_p)
+                        st.session_state.hybrid_analysis = ans
+       
+        else:
+            manual_text = st.text_area("手順書のテキストを貼り付け", height=250)
+            if st.button("🚀 テキストを精査"):
+                if manual_text:
+                    with st.status("AIがテキストを精査中..."):
+                        ans = ask_ai_text([{"role":"system", "content":sys_p}, {"role":"user", "content":manual_text}])
+                        st.session_state.hybrid_analysis = ans
+
+        if "hybrid_analysis" in st.session_state:
+            st.info("💡 **AI解析結果**")
+            st.markdown(st.session_state.hybrid_analysis)
+            if st.button("結果をクリア"):
+                del st.session_state.hybrid_analysis
                 st.rerun()
 
     with tabs[1]:
         st.subheader("⚠️ 事故DB")
+        with get_db() as conn:
+            acc_rows = conn.execute("SELECT * FROM accidents").fetchall()
         for r in acc_rows: st.info(r['content'])
