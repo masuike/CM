@@ -72,7 +72,7 @@ def read_pdf(f):
 
 def ask_ai(messages):
     try:
-        res = client.chat.completions.create(model="gpt-4o-mini", messages=messages, temperature=0.1) # 精度重視で低めに設定
+        res = client.chat.completions.create(model="gpt-4o-mini", messages=messages, temperature=0.1)
         return res.choices[0].message.content
     except: return "AIエラーが発生しました"
 
@@ -125,8 +125,8 @@ with col1:
         with get_db() as conn:
             p_data = conn.execute("SELECT * FROM projects WHERE id = ?", (p_id,)).fetchone()
         project_folder = f"{p_data['building_name']}_{p_data['project_name']}"
-        br_v = st.text_area("🏙️ ビル固有ルール", p_data["building_rule"], key=f"br_{p_id}", height=150)
-        pr_v = st.text_area("🚧 案件固有ルール", p_data["project_rule"], key=f"pr_{p_id}", height=150)
+        br_v = st.text_area("🏙️ ビル固有ルール", p_data["building_rule"], key=f"br_{p_id}", height=120)
+        pr_v = st.text_area("🚧 案件固有ルール", p_data["project_rule"], key=f"pr_{p_id}", height=120)
         if st.button("案件ルール保存"):
             with get_db() as conn:
                 conn.execute("UPDATE projects SET building_rule=?, project_rule=? WHERE id=?", (br_v, pr_v, p_id))
@@ -150,7 +150,6 @@ with col2:
     with tabs[0]:
         st.subheader(f"💬 {sel_label} の相談窓口")
        
-        # 📁 資料アップロードと解析ボタン
         with st.expander("📁 新しい手順書をアップロードして解析", expanded=True):
             up_file = st.file_uploader("PDFを選択", type="pdf", key="pro_up")
             if up_file and st.button("🚀 案件フォルダに保存して解析を開始"):
@@ -159,12 +158,11 @@ with col2:
                 file_content = up_file.getbuffer()
                 with open(f_path, "wb") as f: f.write(file_content)
                
-                with st.status("AIが場所を特定し、ルールを照合中..."):
+                with st.status("AIが技術的リスクを精査中..."):
                     pdf_text = read_pdf(up_file)
-                    # --- 強化されたフィルタリングプロンプト ---
-                    sys_p = f"""あなたは超一流の施工管理技士です。
-まず、アップロードされた【資料】を熟読し、どの場所（階数・エリア）の作業かを特定してください。
-その上で、以下の手順でアドバイスを行ってください。
+                    # --- 現場監督の「深読み」プロンプト ---
+                    sys_p = f"""あなたは30年の経験を持つ超ベテランの施工管理技士です。
+資料の表面的な要約ではなく、技術的な「穴」や「現場で起きるトラブル」を厳しく指摘してください。
 
 【1. 参照データ】
 ・今アップロードされた資料: {pdf_text}
@@ -173,17 +171,23 @@ with col2:
 ・案件固有ルール: {p_data['project_rule'] if p_data else '未設定'}
 ・過去の事故DB: {acc_context}
 
-【2. 厳守ルール】
-1. **場所のフィルタリング**: 資料が「2階」の作業であれば、「5階」など無関係なエリアのルールは徹底して無視してください。
-2. **⚠️警告アラート**: その場所に該当するルール違反や、過去の類似事故がある場合のみ、文頭に【⚠️警告】を付けて記載してください。
-3. **施工管理上の注意点**: その作業において、安全・品質面で具体的に「足りない視点」を指摘してください。
-4. **要約**: この資料で最も重要な決定事項を簡潔に。
+【2. 解析の重要ステップ】
+1. **場所・作業の特定**: 階数や、何（分電盤、WhM、盤など）をどうする作業かを把握。
+2. **ルール照合**: 資料の場所と関係ないルール（2階なのに5階入室など）は徹底して無視。
+3. **技術的「詰め」の確認**:
+   - 「分電盤OFF」があるなら、負荷側への停電周知やPC/サーバー等の影響確認の有無。
+   - 「他社連携（AE社等）」があるなら、具体的な連絡先や当日の合流場所の有無。
+   - 「作業日矛盾」の確認。WhM交換が別日の場合、この手順書に含まれているのは不自然ではないか。
+4. **足りない情報の指摘**: 現場監督として、この手順書で「承認」を出す前に書き足させるべきことをリストアップ。
+
+【3. 出力形式】
+文頭に【⚠️緊急アラート】または【🔍技術的注意点】を付けて、具体的な項目を鋭く指摘してください。
 """
                     st.session_state.auto_analysis = ask_ai([{"role":"system", "content":sys_p}])
                 st.success(f"{up_file.name} の解析が完了しました！")
 
         if "auto_analysis" in st.session_state:
-            st.info("💡 **AIによる自動解析結果（場所を考慮）**")
+            st.info("💡 **AIによる技術解析結果（プロ視点）**")
             st.markdown(st.session_state.auto_analysis)
             if st.button("解析結果をクリア"):
                 del st.session_state.auto_analysis
@@ -194,17 +198,17 @@ with col2:
         for msg in st.session_state.chat_history:
             with st.chat_message(msg["role"]): st.markdown(msg["content"])
        
-        if user_query := st.chat_input("さらに詳しい質問はこちらへ"):
+        if user_query := st.chat_input("さらに詳しい質問（例：AE社の連絡先、資料に載ってる？）"):
             st.session_state.chat_history.append({"role": "user", "content": user_query})
             with st.chat_message("user"): st.markdown(user_query)
             with st.chat_message("assistant"):
                 project_context = get_project_docs(project_folder) if project_folder else ""
-                sys_p = f"施工プロとして回答せよ。\n資料:{project_context}\n共通ルール:{current_co_rule}\n事故DB:{acc_context}"
+                sys_p = f"施工プロとして、資料の中身を厳密にチェックして回答せよ。\n資料:{project_context}\n共通ルール:{current_co_rule}\n事故DB:{acc_context}"
                 ans = ask_ai([{"role":"system", "content":sys_p}] + st.session_state.chat_history)
                 st.markdown(ans)
                 st.session_state.chat_history.append({"role": "assistant", "content": ans})
 
-    # (差分抽出・マスター・事故DB・用語辞典はそのまま維持)
+    # (残りのタブは維持)
     with tabs[1]:
         st.subheader("新旧比較")
         f_old = st.file_uploader("旧版", type="pdf", key="f_old")
