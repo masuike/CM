@@ -153,40 +153,60 @@ with col2:
                 f_path = os.path.join(DATA_DIR, project_folder, up_file.name)
                 os.makedirs(os.path.dirname(f_path), exist_ok=True)
                 with open(f_path, "wb") as f: f.write(up_file.getbuffer())
-                st.success(f"{up_file.name} を保存！")
+                st.success(f"{up_file.name} を保存！AIの記憶に追加されました。")
                 st.rerun()
 
         if "chat_history" not in st.session_state: st.session_state.chat_history = []
         for msg in st.session_state.chat_history:
             with st.chat_message(msg["role"]): st.markdown(msg["content"])
-        if user_query := st.chat_input("質問を入力..."):
+        if user_query := st.chat_input("質問を入力してください（例：今までの決定事項は？）"):
             st.session_state.chat_history.append({"role": "user", "content": user_query})
             with st.chat_message("user"): st.markdown(user_query)
             with st.chat_message("assistant"):
-                sys_p = f"施工プロとして回答せよ。\n資料:{project_context}\n共通ルール:{current_co_rule}\n事故DB:{acc_context}"
+                sys_p = f"あなたは施工管理のプロです。資料、ルール、事故DBに基づき誠実に回答してください。\n【資料】:{project_context}\n【ルール】:{current_co_rule}\n【事故DB】:{acc_context}"
                 ans = ask_ai([{"role":"system", "content":sys_p}] + st.session_state.chat_history)
                 st.markdown(ans)
                 st.session_state.chat_history.append({"role": "assistant", "content": ans})
 
     with tabs[1]:
-        st.subheader("新旧比較")
-        f_old = st.file_uploader("旧版", type="pdf", key="f_old")
-        f_new = st.file_uploader("新版", type="pdf", key="f_new")
-        if f_old and f_new and st.button("🔄 抽出"):
+        st.subheader("新旧手順書の比較・マスター反映")
+        f_old = st.file_uploader("旧版(PDF)", type="pdf", key="f_old")
+        f_new = st.file_uploader("新版(PDF)", type="pdf", key="f_new")
+        if f_old and f_new and st.button("🔄 差分を抽出"):
             t_old, t_new = read_pdf(f_old), read_pdf(f_new)
-            prompt = f"差分を抽出せよ。\n旧:{t_old}\n新:{t_new}"
+            prompt = f"施工手順書の新旧比較を行い、変更点や新しい決定事項を箇条書き（・）で抽出せよ。\n旧:{t_old}\n新:{t_new}"
             st.session_state.diff_items = [l.strip() for l in ask_ai([{"role":"user", "content":prompt}]).split('\n') if l.strip().startswith('・')]
+       
         if "diff_items" in st.session_state:
-            for i, item in enumerate(st.session_state.diff_items): st.checkbox(item, key=f"c_{i}", value=True)
+            st.write("反映したい項目にチェック：")
+            sel_items = []
+            for i, item in enumerate(st.session_state.diff_items):
+                if st.checkbox(item, key=f"c_{i}", value=True): sel_items.append(item)
+            if st.button("選んだ項目をマスターに反映"):
+                if all_p:
+                    new_m = (p_data["master_content"] or "") + "\n" + "\n".join(sel_items)
+                    with get_db() as conn:
+                        conn.execute("UPDATE projects SET master_content=? WHERE id=?", (new_m.strip(), p_id))
+                        conn.commit()
+                    st.success("反映完了！")
+                    del st.session_state.diff_items
+                    st.rerun()
 
     with tabs[2]:
-        if all_p: st.text_area("決定事項", p_data["master_content"], height=300)
+        st.subheader("決定事項（マスター）")
+        if all_p:
+            m_val = st.text_area("この案件の決定事項", p_data["master_content"], height=400)
+            if st.button("マスターを直接保存"):
+                with get_db() as conn:
+                    conn.execute("UPDATE projects SET master_content=? WHERE id=?", (m_val, p_id))
+                    conn.commit()
+                st.success("保存しました")
 
     with tabs[3]:
-        st.subheader("⚠️ 事故DB登録")
-        f_acc = st.file_uploader("事故報告PDFを追加", type="pdf", key="acc_up")
-        if f_acc and st.button("事故DBに登録"):
-            summary = ask_ai([{"role":"user", "content":f"事故の状況と対策を要約せよ:\n{read_pdf(f_acc)}"}])
+        st.subheader("⚠️ 事故DB")
+        f_acc = st.file_uploader("事故報告PDF追加", type="pdf", key="acc_up")
+        if f_acc and st.button("DB登録"):
+            summary = ask_ai([{"role":"user", "content":f"事故の状況と対策を簡潔にまとめろ:\n{read_pdf(f_acc)}"}])
             with get_db() as conn:
                 conn.execute("INSERT INTO accidents (content) VALUES (?)", (summary,))
                 conn.commit()
@@ -195,15 +215,15 @@ with col2:
         for r in acc_rows: st.info(r['content'])
 
     with tabs[4]:
-        st.subheader("📖 用語辞典登録")
-        w = st.text_input("用語")
-        m = st.text_input("意味")
-        if st.button("辞典に登録"):
+        st.subheader("📖 現場用語")
+        w_in = st.text_input("用語")
+        m_in = st.text_input("意味")
+        if st.button("辞典登録"):
             with get_db() as conn:
-                conn.execute("INSERT OR REPLACE INTO dictionary (word, meaning) VALUES (?,?)", (w, m))
+                conn.execute("INSERT OR REPLACE INTO dictionary (word, meaning) VALUES (?,?)", (w_in, m_in))
                 conn.commit()
             st.rerun()
         st.write("---")
         with get_db() as conn:
-            dict_rows = conn.execute("SELECT * FROM dictionary").fetchall()
-            for r in dict_rows: st.write(f"**{r['word']}**: {r['meaning']}")
+            for r in conn.execute("SELECT * FROM dictionary").fetchall():
+                st.write(f"**{r['word']}**: {r['meaning']}")
