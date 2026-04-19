@@ -7,6 +7,7 @@ from io import BytesIO
 from openai import OpenAI
 from PIL import Image
 import PyPDF2
+from pdf2image import convert_from_bytes
 
 # =====================
 # 🔐 初期設定
@@ -62,12 +63,29 @@ def init_db():
 init_db()
 
 # =====================
-# 🛠️ 便利関数
+# 👁️ 解析・AI関数
 # =====================
-def read_pdf(f):
+def read_pdf_text(f):
     if not f: return ""
     r = PyPDF2.PdfReader(f)
     return "\n".join([p.extract_text() for p in r.pages])
+
+def analyze_with_vision(image, prompt):
+    buffered = BytesIO()
+    image.save(buffered, format="PNG")
+    img_str = base64.b64encode(buffered.getvalue()).decode()
+    res = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": [
+                {"type": "text", "text": "画像内の文字や手順を精密に読み取り、リスクを抽出してください。"},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_str}"}}
+            ]}
+        ],
+        temperature=0.0
+    )
+    return res.choices[0].message.content
 
 def ask_ai(messages):
     res = client.chat.completions.create(model="gpt-4o", messages=messages, temperature=0.1)
@@ -76,41 +94,40 @@ def ask_ai(messages):
 # =====================
 # UI構成
 # =====================
-st.title("🏗️ 施工管理AIツール (全機能・辞書復活版)")
+st.title("🏗️ 施工管理AIツール (最強フルスペック版)")
 
 col1, col2 = st.columns([1, 2])
 
-# --- 左カラム：案件と設定 ---
+# --- 左カラム ---
 with col1:
     with st.expander("🏢 共通ルール・辞書"):
-        tab_sub = st.tabs(["ルール", "辞書"])
-        with tab_sub[0]:
+        t_sub = st.tabs(["ルール", "辞書"])
+        with t_sub[0]:
             with get_db() as conn:
                 c_set = conn.execute("SELECT common_rule FROM company_settings WHERE id = 1").fetchone()
-                current_co_rule = c_set["common_rule"] if c_set else ""
-            co_v = st.text_area("全案件共通", current_co_rule, height=80)
-            if st.button("企業ルール保存"):
+                cur_co = c_set["common_rule"] if c_set else ""
+            co_v = st.text_area("全案件共通", cur_co, height=80)
+            if st.button("ルール保存"):
                 with get_db() as conn:
                     conn.execute("UPDATE company_settings SET common_rule = ? WHERE id = 1", (co_v,))
                     conn.commit()
                 st.success("保存完了")
-        with tab_sub[1]:
+        with t_sub[1]:
             with get_db() as conn:
                 words = conn.execute("SELECT * FROM dictionary").fetchall()
             for w in words: st.write(f"📖 **{w['word']}**: {w['mean']}")
-            new_w = st.text_input("用語")
-            new_m = st.text_input("意味")
+            nw = st.text_input("用語")
+            nm = st.text_input("意味")
             if st.button("辞書登録"):
                 with get_db() as conn:
-                    conn.execute("INSERT INTO dictionary (word, mean) VALUES (?, ?)", (new_w, new_m))
+                    conn.execute("INSERT INTO dictionary (word, mean) VALUES (?, ?)", (nw, nm))
                     conn.commit()
                 st.rerun()
 
     st.subheader("🆕 案件管理")
     with st.expander("➕ 新規案件を追加"):
-        nb = st.text_input("ビル名")
-        np = st.text_input("案件名")
-        if st.button("案件を登録"):
+        nb, np = st.text_input("ビル名"), st.text_input("案件名")
+        if st.button("登録"):
             with get_db() as conn:
                 conn.execute("INSERT OR IGNORE INTO projects (building_name, project_name) VALUES (?, ?)", (nb, np))
                 conn.commit()
@@ -121,73 +138,78 @@ with col1:
    
     p_data = None
     if all_p:
-        p_options = {f"{r['building_name']} / {r['project_name']}": r['id'] for r in all_p}
-        sel_label = st.selectbox("案件を選択", list(p_options.keys()))
-        p_id = p_options[sel_label]
+        p_opts = {f"{r['building_name']} / {r['project_name']}": r['id'] for r in all_p}
+        p_id = p_opts[st.selectbox("案件を選択", list(p_opts.keys()))]
         with get_db() as conn:
             p_data = conn.execute("SELECT * FROM projects WHERE id = ?", (p_id,)).fetchone()
        
-        br_v = st.text_area("🏙️ ビル固有ルール", p_data["building_rule"], height=100)
-        pr_v = st.text_area("🚧 案件固有ルール", p_data["project_rule"], height=100)
-        if st.button("案件ルールを保存"):
+        br_v = st.text_area("🏙️ ビル固有ルール", p_data["building_rule"], height=80)
+        pr_v = st.text_area("🚧 案件固有ルール", p_data["project_rule"], height=80)
+        if st.button("案件ルール保存"):
             with get_db() as conn:
                 conn.execute("UPDATE projects SET building_rule=?, project_rule=? WHERE id=?", (br_v, pr_v, p_id))
                 conn.commit()
             st.success("保存完了")
 
-# --- 右カラム：メイン機能 ---
+# --- 右カラム ---
 with col2:
-    tabs = st.tabs(["📊 手順書精査", "📝 議事録比較", "💬 自由相談", "⚠️ 事故DB"])
+    tabs = st.tabs(["📊 手順書解析", "📝 議事録比較", "💎 マスター・相談", "⚠️ 事故DB"])
   
-    # --- タブ1: 手順書精査 ---
+    # タブ1: 手順書解析（ハイブリッド）
     with tabs[0]:
-        st.subheader("🔍 手順書テキスト解析")
-        manual_text = st.text_area("手順書の中身をコピペしてね", height=300)
-        if st.button("🚀 プロの視点でチェック"):
-            sys_p = f"施工管理のプロとして以下をチェック：緊急連絡先、作業時間、分電盤OFFの影響。ルール：{current_co_rule} / {p_data['building_rule'] if p_data else ''}"
-            ans = ask_ai([{"role":"system", "content":sys_p}, {"role":"user", "content":manual_text}])
-            st.info(ans)
+        st.subheader("🔍 手順書チェック")
+        m_mode = st.radio("方法", ["PDF/画像アップ", "テキスト貼り付け"], horizontal=True)
+        sys_p = f"施工管理のプロとして解析。共通ルール：{cur_co} / 案件ルール：{p_data['building_rule'] if p_data else ''}"
 
-    # --- タブ2: 議事録比較 ---
+        if m_mode == "PDF/画像アップ":
+            up = st.file_uploader("ファイルを選択", type=["pdf", "png", "jpg", "jpeg"])
+            if up:
+                if up.type == "application/pdf":
+                    imgs = convert_from_bytes(up.read())
+                    target = imgs[0]
+                else: target = Image.open(up)
+                st.image(target, use_container_width=True)
+                if st.button("🚀 画像として精密解析"):
+                    with st.status("解析中..."): st.info(analyze_with_vision(target, sys_p))
+        else:
+            txt = st.text_area("テキストを貼り付け", height=200)
+            if st.button("🚀 テキストで精査"):
+                with st.status("精査中..."): st.info(ask_ai([{"role":"system","content":sys_p},{"role":"user","content":txt}]))
+
+    # タブ2: 議事録比較（チェックボックス登録）
     with tabs[1]:
-        st.subheader("📂 議事録比較・マスター登録")
-        f1 = st.file_uploader("前回議事録", type="pdf")
-        f2 = st.file_uploader("今回議事録", type="pdf")
-        if f1 and f2 and st.button("🔄 差分を抽出"):
-            t1, t2 = read_pdf(f1), read_pdf(f2)
-            prompt = f"前回と今回の議事録を比較し、新しく決まった事項や変更点を「箇条書き」で抽出してください。\n前回：{t1}\n今回：{t2}"
-            diff = ask_ai([{"role":"user", "content":prompt}])
-            st.session_state.diff_list = [d.strip("- ") for d in diff.split("\n") if d.strip()]
+        st.subheader("📂 議事録の差分をマスターへ")
+        f1, f2 = st.file_uploader("前回", type="pdf"), st.file_uploader("今回", type="pdf")
+        if f1 and f2 and st.button("🔄 比較開始"):
+            t1, t2 = read_pdf_text(f1), read_pdf_text(f2)
+            diff = ask_ai([{"role":"user", "content":f"前回と今回の議事録から新しい決定事項を箇条書きで抽出せよ。\n前回:{t1}\n今回:{t2}"}])
+            st.session_state.diffs = [d.strip("- ") for d in diff.split("\n") if d.strip()]
 
-        if "diff_list" in st.session_state:
-            st.write("### 💎 マスターに登録する項目を選んでね")
-            selected = []
-            for d in st.session_state.diff_list:
-                if st.checkbox(d, key=d): selected.append(d)
-            if st.button("選択した項目をマスターに保存"):
-                new_master = p_data["master_content"] + "\n" + "\n".join(selected)
+        if "diffs" in st.session_state:
+            sel = []
+            for d in st.session_state.diffs:
+                if st.checkbox(d, key=d): sel.append(d)
+            if st.button("マスターに登録"):
+                new_m = (p_data["master_content"] or "") + "\n" + "\n".join(sel)
                 with get_db() as conn:
-                    conn.execute("UPDATE projects SET master_content=? WHERE id=?", (new_master, p_id))
+                    conn.execute("UPDATE projects SET master_content=? WHERE id=?", (new_m, p_id))
                     conn.commit()
-                st.success("マスターを更新しました！")
+                st.success("登録完了！")
 
-    # --- タブ3: 自由相談 ---
+    # タブ3: マスター・相談
     with tabs[2]:
-        st.subheader("💬 AI相談 & マスター確認")
-        st.write("### 現在のマスター内容")
-        st.info(p_data["master_content"] if p_data else "未登録")
-        user_in = st.chat_input("何でも聞いてね")
-        if user_in:
-            res = ask_ai([{"role":"system", "content":f"マスター情報：{p_data['master_content'] if p_data else ''}"}, {"role":"user", "content":user_in}])
-            st.write(res)
+        st.subheader("💬 AI相談 & 現在のマスター")
+        st.markdown(f"**現在の決定事項:**\n{p_data['master_content'] if p_data else 'なし'}")
+        if prompt := st.chat_input("相談内容を入力..."):
+            st.write(ask_ai([{"role":"system","content":f"マスター:{p_data['master_content']}"},{"role":"user","content":prompt}]))
 
-    # --- タブ4: 事故DB ---
+    # タブ4: 事故DB
     with tabs[3]:
         st.subheader("⚠️ 事故DB")
-        new_acc = st.text_input("事故・ヒヤリハット追加")
-        if st.button("DB登録"):
+        acc_in = st.text_input("事例追加")
+        if st.button("DBに追加"):
             with get_db() as conn:
-                conn.execute("INSERT INTO accidents (content) VALUES (?)", (new_acc,))
+                conn.execute("INSERT INTO accidents (content) VALUES (?)", (acc_in,))
                 conn.commit()
             st.rerun()
         with get_db() as conn:
