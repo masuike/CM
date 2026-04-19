@@ -117,6 +117,7 @@ with col1:
   
     project_folder = ""
     sel_label = ""
+    p_data = None
     if all_p:
         p_options = {f"{r['building_name']} / {r['project_name']}": r['id'] for r in all_p}
         sel_label = st.selectbox("案件を選んでね", list(p_options.keys()))
@@ -148,44 +149,62 @@ with col2:
   
     with tabs[0]:
         st.subheader(f"💬 {sel_label} の相談窓口")
-        project_context = get_project_docs(project_folder) if project_folder else ""
-        with st.expander("📁 資料を追加アップロード"):
+       
+        # 📁 資料アップロードと解析ボタン
+        with st.expander("📁 新しい手順書をアップロードして解析", expanded=True):
             up_file = st.file_uploader("PDFを選択", type="pdf", key="pro_up")
-            if up_file and st.button("案件フォルダに保存"):
+            if up_file and st.button("🚀 案件フォルダに保存して解析を開始"):
+                # 1. 保存処理
                 f_path = os.path.join(DATA_DIR, project_folder, up_file.name)
                 os.makedirs(os.path.dirname(f_path), exist_ok=True)
-                with open(f_path, "wb") as f: f.write(up_file.getbuffer())
-                st.success(f"{up_file.name} を保存！")
-                st.rerun()
+                file_content = up_file.getbuffer()
+                with open(f_path, "wb") as f: f.write(file_content)
+               
+                # 2. 解析処理（自動実行）
+                with st.status("AIが資料とルールを照合中..."):
+                    pdf_text = read_pdf(up_file)
+                    sys_p = f"""あなたは施工管理のプロです。以下の情報を元に、資料の解析とアドバイスを行ってください。
 
+【1. 参照データ】
+・今アップロードされた資料: {pdf_text}
+・企業共通ルール: {current_co_rule}
+・ビル固有ルール: {p_data['building_rule'] if p_data else '未設定'}
+・案件固有ルール: {p_data['project_rule'] if p_data else '未設定'}
+・過去の事故DB: {acc_context}
+
+【2. 必須回答項目】
+1. **⚠️警告アラート**: 各種ルール違反や、事故DBと類似する危険箇所があれば最初に記載。
+2. **施工管理上の注意点**: 安全、品質の観点で足りない視点を指摘。
+3. **要約**: この資料で最も重要な決定事項。
+"""
+                    st.session_state.auto_analysis = ask_ai([{"role":"system", "content":sys_p}])
+                st.success(f"{up_file.name} の保存と解析が完了しました！")
+
+        # 自動解析結果の表示エリア
+        if "auto_analysis" in st.session_state:
+            st.info("💡 **AIによる自動解析結果**")
+            st.markdown(st.session_state.auto_analysis)
+            if st.button("解析結果をクリア"):
+                del st.session_state.auto_analysis
+                st.rerun()
+            st.write("---")
+
+        # 通常のチャット履歴
         if "chat_history" not in st.session_state: st.session_state.chat_history = []
         for msg in st.session_state.chat_history:
             with st.chat_message(msg["role"]): st.markdown(msg["content"])
        
-        if user_query := st.chat_input("質問を入力（例：この手順書に危険なポイントはある？）"):
+        if user_query := st.chat_input("さらに詳しい質問はこちらへ"):
             st.session_state.chat_history.append({"role": "user", "content": user_query})
             with st.chat_message("user"): st.markdown(user_query)
             with st.chat_message("assistant"):
-                # --- AIへの指示書（プロンプト）の強化 ---
-                sys_p = f"""あなたはベテランの施工管理技士です。以下の情報を元に、資料の解析とアドバイスを行ってください。
-
-【1. 参照データ】
-・アップロード資料: {project_context}
-・企業共通ルール: {current_co_rule}
-・ビル固有ルール: {p_data['building_rule'] if all_p else '未設定'}
-・案件固有ルール: {p_data['project_rule'] if all_p else '未設定'}
-・過去の事故DB: {acc_context}
-
-【2. 回答のルール】
-1. **アラート表示**: 資料の内容が「各種ルール」に違反している、または「過去の事故」と類似する危険がある場合は、文頭に【⚠️警告】を付けて強調してください。
-2. **施工の注意点**: 安全管理、品質管理の観点から、資料に足りない点や現地で確認すべきことをリストアップしてください。
-3. **要約**: ユーザーが「何をすべきか」を簡潔にまとめてください。
-4. **回答スタイル**: プロフェッショナルかつ建設的なトーンで回答してください。"""
-
+                project_context = get_project_docs(project_folder) if project_folder else ""
+                sys_p = f"施工プロとして回答せよ。\n資料:{project_context}\n共通ルール:{current_co_rule}\n事故DB:{acc_context}"
                 ans = ask_ai([{"role":"system", "content":sys_p}] + st.session_state.chat_history)
                 st.markdown(ans)
                 st.session_state.chat_history.append({"role": "assistant", "content": ans})
 
+    # (残りのタブ 1, 2, 3, 4 は前のコードと同じ)
     with tabs[1]:
         st.subheader("新旧比較")
         f_old = st.file_uploader("旧版", type="pdf", key="f_old")
@@ -198,7 +217,7 @@ with col2:
             for i, item in enumerate(st.session_state.diff_items): st.checkbox(item, key=f"c_{i}", value=True)
 
     with tabs[2]:
-        if all_p:
+        if p_data:
             m_val = st.text_area("決定事項", p_data["master_content"], height=300)
             if st.button("マスターを直接保存"):
                 with get_db() as conn:
