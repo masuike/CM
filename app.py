@@ -10,7 +10,7 @@ import PyPDF2
 # =====================
 PASSWORD = os.getenv("APP_PASSWORD", "test123")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-DATA_DIR = "data" # PDFを保管する親フォルダ
+DATA_DIR = "data"
 
 if "auth" not in st.session_state:
     st.session_state.auth = False
@@ -60,7 +60,7 @@ def init_db():
 init_db()
 
 # =====================
-# 共通関数 (PDF読み込み・AI)
+# 共通関数
 # =====================
 def read_pdf(f):
     if not f: return ""
@@ -75,7 +75,6 @@ def ask_ai(messages):
         return res.choices[0].message.content
     except: return "AIエラーが発生しました"
 
-# --- 特定の案件フォルダからPDFを全スキャンする関数 ---
 def get_project_docs(project_folder_name):
     folder_path = os.path.join(DATA_DIR, project_folder_name)
     all_text = ""
@@ -94,12 +93,16 @@ st.title("🏗️ 施工管理AIツール (データ解析版)")
 
 col1, col2 = st.columns([1, 2])
 
-# --- 左カラム: 案件・ルール管理 ---
+# --- 共通データの取得 ---
+with get_db() as conn:
+    c_set = conn.execute("SELECT common_rule FROM company_settings WHERE id = 1").fetchone()
+    current_co_rule = c_set["common_rule"] if c_set else ""
+    acc_list = conn.execute("SELECT content FROM accidents").fetchall()
+    acc_context = "\n".join([f"・{r['content']}" for r in acc_list])
+
+# --- 左カラム ---
 with col1:
     with st.expander("🏢 企業共通ルール"):
-        with get_db() as conn:
-            c_set = conn.execute("SELECT common_rule FROM company_settings WHERE id = 1").fetchone()
-            current_co_rule = c_set["common_rule"] if c_set else ""
         co_v = st.text_area("全案件共通", current_co_rule, height=80)
         if st.button("企業ルール保存"):
             with get_db() as conn:
@@ -119,7 +122,6 @@ with col1:
         with get_db() as conn:
             p_data = conn.execute("SELECT * FROM projects WHERE id = ?", (p_id,)).fetchone()
        
-        # フォルダ名を決定（例: 渋谷ビル_改修工事）
         project_folder = f"{p_data['building_name']}_{p_data['project_name']}"
       
         br_v = st.text_area("🏙️ ビル固有ルール", p_data["building_rule"], key=f"br_{p_id}")
@@ -137,77 +139,64 @@ with col1:
             with get_db() as conn:
                 conn.execute("INSERT INTO projects (building_name, project_name) VALUES (?, ?)", (nb, np))
                 conn.commit()
-            # 自動でdata内にフォルダを作成
             new_folder = os.path.join(DATA_DIR, f"{nb}_{np}")
             os.makedirs(new_folder, exist_ok=True)
             st.rerun()
 
-# --- 右カラム: メイン機能 ---
+# --- 右カラム ---
 with col2:
     tabs = st.tabs(["📊 資料解析チャット", "🔄 差分抽出", "💎 マスター", "⚠️ 事故DB", "📖 用語辞典"])
   
-    # 1. 資料解析チャット（ここを大幅強化！）
     with tabs[0]:
         st.subheader(f"💬 {sel_label if all_p else ''} の相談窓口")
-       
-        # 案件フォルダ内のPDFを読み込み
         project_context = get_project_docs(project_folder) if all_p else ""
        
-        with st.expander("📁 この案件に資料を追加アップロード"):
+        with st.expander("📁 資料を追加アップロード"):
             up_file = st.file_uploader("PDFを選択", type="pdf", key="pro_up")
-            if up_file and st.button("この案件のフォルダに保存"):
+            if up_file and st.button("案件フォルダに保存"):
                 folder_path = os.path.join(DATA_DIR, project_folder)
                 os.makedirs(folder_path, exist_ok=True)
                 with open(os.path.join(folder_path, up_file.name), "wb") as f:
                     f.write(up_file.getbuffer())
-                st.success(f"{up_file.name} を保存したよ！AIが読めるようになったよ。")
+                st.success(f"{up_file.name} を保存しました！")
                 st.rerun()
 
-        # チャット機能
         if "chat_history" not in st.session_state:
             st.session_state.chat_history = []
        
         for msg in st.session_state.chat_history:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
+            with st.chat_message(msg["role"]): st.markdown(msg["content"])
 
-        if user_query := st.chat_input("この案件の資料について聞いてね"):
+        if user_query := st.chat_input("質問を入力..."):
             st.session_state.chat_history.append({"role": "user", "content": user_query})
-            with st.chat_message("user"):
-                st.markdown(user_query)
-           
+            with st.chat_message("user"): st.markdown(user_query)
             with st.chat_message("assistant"):
-                sys_prompt = f"""あなたは施工管理プロです。以下の案件資料、ルール、事故DBを参考に回答せよ。
-                【案件資料】: {project_context}
-                【共通ルール】: {current_co_rule}
-                【事故DB】: {acc_list}"""
-               
-                ans = ask_ai([{"role":"system", "content":sys_prompt}] + st.session_state.chat_history)
+                sys_p = f"施工プロとして回答せよ。\n資料:{project_context}\n共通ルール:{current_co_rule}\n事故DB:{acc_context}"
+                ans = ask_ai([{"role":"system", "content":sys_p}] + st.session_state.chat_history)
                 st.markdown(ans)
                 st.session_state.chat_history.append({"role": "assistant", "content": ans})
 
-    # --- 2〜5のタブは昨日の機能をそのまま維持 ---
     with tabs[1]:
-        st.subheader("新旧手順書の比較")
-        f_old = st.file_uploader("旧版(PDF)", type="pdf", key="f_old")
-        f_new = st.file_uploader("新版(PDF)", type="pdf", key="f_new")
-        if f_old and f_new and st.button("🔄 差分を抽出"):
+        st.subheader("新旧比較")
+        f_old = st.file_uploader("旧版", type="pdf", key="f_old")
+        f_new = st.file_uploader("新版", type="pdf", key="f_new")
+        if f_old and f_new and st.button("🔄 抽出"):
             t_old, t_new = read_pdf(f_old), read_pdf(f_new)
-            prompt = f"施工手順書の新旧比較を行い、変更点を箇条書き（・）で抽出せよ。\n旧:{t_old}\n新:{t_new}"
+            prompt = f"差分を抽出せよ。\n旧:{t_old}\n新:{t_new}"
             st.session_state.diff_items = [l.strip() for l in ask_ai([{"role":"user", "content":prompt}]).split('\n') if l.strip().startswith('・')]
         if "diff_items" in st.session_state:
             for i, item in enumerate(st.session_state.diff_items):
-                if st.checkbox(item, key=f"c_{i}", value=True): pass
-            if st.button("マスター反映"): st.success("反映したよ（デモ）")
+                st.checkbox(item, key=f"c_{i}", value=True)
 
     with tabs[2]:
-        st.subheader("決定事項（マスター）")
-        if all_p: st.text_area("マスター内容", p_data["master_content"], height=300)
+        if all_p: st.text_area("決定事項", p_data["master_content"], height=300)
 
     with tabs[3]:
         st.subheader("⚠️ 事故DB")
         for r in acc_list: st.write(f"・{r['content']}")
 
     with tabs[4]:
-        st.subheader("📖 現場用語")
-        # 用語表示など（昨日と同じ）
+        st.subheader("📖 用語辞典")
+        with get_db() as conn:
+            for r in conn.execute("SELECT * FROM dictionary").fetchall():
+                st.write(f"**{r['word']}**: {r['meaning']}")
