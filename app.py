@@ -65,11 +65,12 @@ def init_db():
 init_db()
 
 # =====================
-# 🛠️ 強化されたPDF読み取り（Vision & Text）
+# 🛠️ 強化されたPDF読み取り（Vision集中型）
 # =====================
 def pdf_to_base64_images(pdf_bytes):
     """PDFを画像に変換してbase64文字列のリストを返す"""
-    images = convert_from_bytes(pdf_bytes)
+    # 混乱を防ぐため解像度を高めに設定(dpi=200)
+    images = convert_from_bytes(pdf_bytes, dpi=200)
     base64_images = []
     for img in images:
         buffered = BytesIO()
@@ -78,22 +79,36 @@ def pdf_to_base64_images(pdf_bytes):
     return base64_images
 
 def analyze_with_vision(pdf_bytes, system_prompt):
-    """画像としてPDFを解析する（表形式に強い）"""
+    """画像としてPDFの1ページ目に全集中して解析する"""
     base64_images = pdf_to_base64_images(pdf_bytes)
    
-    # 最初の2ページ分を画像として送信（API制限とコスト考慮）
-    content = [{"type": "text", "text": system_prompt}]
-    for b64 in base64_images[:2]:
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
-        })
+    if not base64_images:
+        return "PDFの画像変換に失敗しました。"
+
+    # AIへの指示を強化：表の1文字1文字を読み取るように命令
+    instruction = (
+        "添付された画像は工事の施工手順書です。表の構造（行と列の関係）を正確に把握し、"
+        "特に「開始時間」「作業場所」「緊急連絡先（電話番号）」「作業ステップの詳細」を"
+        "一文字も漏らさずに読み取ってください。その内容を踏まえて、以下の指示を実行してください。\n\n"
+        + system_prompt
+    )
+   
+    content = [
+        {"type": "text", "text": instruction}
+    ]
+   
+    # 1ページ目に全神経を集中させる（混乱防止）
+    content.append({
+        "type": "image_url",
+        "image_url": {"url": f"data:image/jpeg;base64,{base64_images[0]}"}
+    })
 
     try:
         res = client.chat.completions.create(
-            model="gpt-4o", # Visionが使える最強モデル
+            model="gpt-4o",
             messages=[{"role": "user", "content": content}],
-            max_tokens=2000
+            max_tokens=2000,
+            temperature=0.0 # 数値や事実の正確性を最大化
         )
         return res.choices[0].message.content
     except Exception as e:
@@ -102,7 +117,7 @@ def analyze_with_vision(pdf_bytes, system_prompt):
 # =====================
 # UI
 # =====================
-st.title("🏗️ 施工管理AIツール (Vision強化版)")
+st.title("🏗️ 施工管理AIツール (Vision全集中版)")
 
 col1, col2 = st.columns([1, 2])
 
@@ -152,47 +167,53 @@ with col2:
     with tabs[0]:
         st.subheader(f"💬 {sel_label} の相談窓口")
        
-        with st.expander("📁 PDF手順書をアップロード（画像として精密解析）", expanded=True):
+        with st.expander("📁 PDF手順書を精密解析（1枚目に全集中）", expanded=True):
             up_file = st.file_uploader("PDFを選択", type="pdf", key="pro_up")
-            if up_file and st.button("🚀 画像解析を実行"):
+            if up_file and st.button("🚀 精密解析を実行"):
                 pdf_bytes = up_file.read()
                
-                with st.status("AIが資料を「画像」として隅々まで確認中..."):
-                    # --- 現場監督の「眼」を持つプロンプト ---
-                    sys_p = f"""あなたは30年の経験を持つ超ベテランの施工管理技士です。
-送られた画像（PDF）の「表」を隅々まで見て、以下の情報を精査してください。
+                with st.status("ベテラン監督の眼で表を読み取り中..."):
+                    # --- 指示内容の定義 ---
+                    sys_p = f"""【解析の柱】
+1. 資料内の「開始時間」と「緊急連絡先（AE社等）」の有無を明示せよ。
+2. 施工場所（階数）を特定し、関係ないルールは完全に無視せよ。
+3. 「分電盤OFF」に伴う、負荷側への停電周知やサーバー等への影響確認の有無を厳しく指摘せよ。
+4. WhM交換などの主要作業が、他の日と混同されていないか整合性を確認せよ。
 
-【1. 基本情報の確認】
-・開始時間は何時か？（表の隅まで確認してください）
-・緊急連絡先（AE社、電力会社等）の電話番号は記載されているか？
+【参照ルール】
+・企業共通: {current_co_rule}
+・案件/ビル: {p_data['building_rule'] if p_data else ''} / {p_data['project_rule'] if p_data else ''}
 
-【2. 技術的リスクの深掘り】
-・「分電盤OFF」がある場合、負荷側（PC等）への影響周知があるか？
-・作業のステップに漏れはないか？（例：WhM交換が別日の場合、手順が混ざっていないか）
-
-【3. ルール照合】
-・企業共通ルール: {current_co_rule}
-・ビル・案件ルール: {p_data['building_rule'] if p_data else ''} / {p_data['project_rule'] if p_data else ''}
-・これらと照らして、場所（階数）や手順に矛盾がないか？
-
-【4. 指摘事項】
-現場監督として「これじゃ承認できない」という不備を【⚠️警告】として、
-プロとしてのアドバイスを【🔍技術的注意点】として出力してください。
+【出力】
+不備は【⚠️警告】、プロの視点は【🔍技術的注意点】として出力してください。
 """
                     st.session_state.auto_analysis = analyze_with_vision(pdf_bytes, sys_p)
-                st.success("画像解析が完了しました！")
+                st.success("精密解析が完了しました！")
 
         if "auto_analysis" in st.session_state:
-            st.info("💡 **AIによる精密解析結果（表も読めています）**")
+            st.info("💡 **AIによる精密解析結果**")
             st.markdown(st.session_state.auto_analysis)
-            if st.button("解析結果をクリア"):
+            if st.button("表示をクリア"):
                 del st.session_state.auto_analysis
                 st.rerun()
+            st.write("---")
+
+        if "chat_history" not in st.session_state: st.session_state.chat_history = []
+        for msg in st.session_state.chat_history:
+            with st.chat_message(msg["role"]): st.markdown(msg["content"])
+       
+        if user_query := st.chat_input("もっと詳しく聞きたいことは？"):
+            st.session_state.chat_history.append({"role": "user", "content": user_query})
+            with st.chat_message("user"): st.markdown(user_query)
+            with st.chat_message("assistant"):
+                sys_p = f"施工プロとして回答せよ。共通ルール:{current_co_rule}\n事故DB:{acc_context}"
+                ans = ask_ai([{"role":"system", "content":sys_p}] + st.session_state.chat_history)
+                st.markdown(ans)
+                st.session_state.chat_history.append({"role": "assistant", "content": ans})
 
     with tabs[1]:
-        st.subheader("新旧比較")
-        st.write("※ここは文字ベースの比較です")
-        # （以前のコードと同様の比較処理をここに追加可能）
+        st.subheader("新旧比較（テキストベース）")
+        st.write("※図面や表の視覚的な比較は今後実装予定です")
 
     with tabs[2]:
         if p_data:
