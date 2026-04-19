@@ -227,3 +227,10 @@ with col2:
         with get_db() as conn:
             for r in conn.execute("SELECT * FROM dictionary").fetchall():
                 st.write(f"**{r['word']}**: {r['meaning']}")
+# --- メンテナンス用：データベースを初期化するボタン ---
+st.sidebar.markdown("---")
+if st.sidebar.button("⚠️ 全データをリセット（削除）"):
+    if os.path.exists(DB_PATH):
+        os.remove(DB_PATH)
+        st.success("データベースを削除したよ。再起動してね！")
+        st.rerun()
