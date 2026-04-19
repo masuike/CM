@@ -11,6 +11,7 @@ import PyPDF2
 PASSWORD = os.getenv("APP_PASSWORD", "test123")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 DATA_DIR = "data"
+if not os.path.exists(DATA_DIR): os.makedirs(DATA_DIR)
 
 if "auth" not in st.session_state:
     st.session_state.auth = False
@@ -89,7 +90,7 @@ def get_project_docs(project_folder_name):
 # =====================
 # UI
 # =====================
-st.title("🏗️ 施工管理AIツール (データ解析版)")
+st.title("🏗️ 施工管理AIツール (完全統合版)")
 
 col1, col2 = st.columns([1, 2])
 
@@ -97,8 +98,8 @@ col1, col2 = st.columns([1, 2])
 with get_db() as conn:
     c_set = conn.execute("SELECT common_rule FROM company_settings WHERE id = 1").fetchone()
     current_co_rule = c_set["common_rule"] if c_set else ""
-    acc_list = conn.execute("SELECT content FROM accidents").fetchall()
-    acc_context = "\n".join([f"・{r['content']}" for r in acc_list])
+    acc_rows = conn.execute("SELECT * FROM accidents").fetchall()
+    acc_context = "\n".join([f"・{r['content']}" for r in acc_rows])
 
 # --- 左カラム ---
 with col1:
@@ -118,12 +119,9 @@ with col1:
         p_options = {f"{r['building_name']} / {r['project_name']}": r['id'] for r in all_p}
         sel_label = st.selectbox("案件を選んでね", list(p_options.keys()))
         p_id = p_options[sel_label]
-      
         with get_db() as conn:
             p_data = conn.execute("SELECT * FROM projects WHERE id = ?", (p_id,)).fetchone()
-       
         project_folder = f"{p_data['building_name']}_{p_data['project_name']}"
-      
         br_v = st.text_area("🏙️ ビル固有ルール", p_data["building_rule"], key=f"br_{p_id}")
         pr_v = st.text_area("🚧 案件固有ルール", p_data["project_rule"], key=f"pr_{p_id}")
         if st.button("案件ルール保存"):
@@ -139,8 +137,7 @@ with col1:
             with get_db() as conn:
                 conn.execute("INSERT INTO projects (building_name, project_name) VALUES (?, ?)", (nb, np))
                 conn.commit()
-            new_folder = os.path.join(DATA_DIR, f"{nb}_{np}")
-            os.makedirs(new_folder, exist_ok=True)
+            os.makedirs(os.path.join(DATA_DIR, f"{nb}_{np}"), exist_ok=True)
             st.rerun()
 
 # --- 右カラム ---
@@ -150,23 +147,18 @@ with col2:
     with tabs[0]:
         st.subheader(f"💬 {sel_label if all_p else ''} の相談窓口")
         project_context = get_project_docs(project_folder) if all_p else ""
-       
         with st.expander("📁 資料を追加アップロード"):
             up_file = st.file_uploader("PDFを選択", type="pdf", key="pro_up")
             if up_file and st.button("案件フォルダに保存"):
-                folder_path = os.path.join(DATA_DIR, project_folder)
-                os.makedirs(folder_path, exist_ok=True)
-                with open(os.path.join(folder_path, up_file.name), "wb") as f:
-                    f.write(up_file.getbuffer())
-                st.success(f"{up_file.name} を保存しました！")
+                f_path = os.path.join(DATA_DIR, project_folder, up_file.name)
+                os.makedirs(os.path.dirname(f_path), exist_ok=True)
+                with open(f_path, "wb") as f: f.write(up_file.getbuffer())
+                st.success(f"{up_file.name} を保存！")
                 st.rerun()
 
-        if "chat_history" not in st.session_state:
-            st.session_state.chat_history = []
-       
+        if "chat_history" not in st.session_state: st.session_state.chat_history = []
         for msg in st.session_state.chat_history:
             with st.chat_message(msg["role"]): st.markdown(msg["content"])
-
         if user_query := st.chat_input("質問を入力..."):
             st.session_state.chat_history.append({"role": "user", "content": user_query})
             with st.chat_message("user"): st.markdown(user_query)
@@ -185,18 +177,33 @@ with col2:
             prompt = f"差分を抽出せよ。\n旧:{t_old}\n新:{t_new}"
             st.session_state.diff_items = [l.strip() for l in ask_ai([{"role":"user", "content":prompt}]).split('\n') if l.strip().startswith('・')]
         if "diff_items" in st.session_state:
-            for i, item in enumerate(st.session_state.diff_items):
-                st.checkbox(item, key=f"c_{i}", value=True)
+            for i, item in enumerate(st.session_state.diff_items): st.checkbox(item, key=f"c_{i}", value=True)
 
     with tabs[2]:
         if all_p: st.text_area("決定事項", p_data["master_content"], height=300)
 
     with tabs[3]:
-        st.subheader("⚠️ 事故DB")
-        for r in acc_list: st.write(f"・{r['content']}")
+        st.subheader("⚠️ 事故DB登録")
+        f_acc = st.file_uploader("事故報告PDFを追加", type="pdf", key="acc_up")
+        if f_acc and st.button("事故DBに登録"):
+            summary = ask_ai([{"role":"user", "content":f"事故の状況と対策を要約せよ:\n{read_pdf(f_acc)}"}])
+            with get_db() as conn:
+                conn.execute("INSERT INTO accidents (content) VALUES (?)", (summary,))
+                conn.commit()
+            st.rerun()
+        st.write("---")
+        for r in acc_rows: st.info(r['content'])
 
     with tabs[4]:
-        st.subheader("📖 用語辞典")
+        st.subheader("📖 用語辞典登録")
+        w = st.text_input("用語")
+        m = st.text_input("意味")
+        if st.button("辞典に登録"):
+            with get_db() as conn:
+                conn.execute("INSERT OR REPLACE INTO dictionary (word, meaning) VALUES (?,?)", (w, m))
+                conn.commit()
+            st.rerun()
+        st.write("---")
         with get_db() as conn:
-            for r in conn.execute("SELECT * FROM dictionary").fetchall():
-                st.write(f"**{r['word']}**: {r['meaning']}")
+            dict_rows = conn.execute("SELECT * FROM dictionary").fetchall()
+            for r in dict_rows: st.write(f"**{r['word']}**: {r['meaning']}")
