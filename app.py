@@ -94,7 +94,7 @@ def ask_ai(messages):
 # =====================
 # UI構成
 # =====================
-st.title("🏗️ 施工管理AIツール (最強フルスペック版)")
+st.title("🏗️ 施工管理AIツール (辞書メンテナンス版)")
 
 col1, col2 = st.columns([1, 2])
 
@@ -112,17 +112,34 @@ with col1:
                     conn.execute("UPDATE company_settings SET common_rule = ? WHERE id = 1", (co_v,))
                     conn.commit()
                 st.success("保存完了")
+       
         with t_sub[1]:
+            st.write("### 📖 登録済み用語")
             with get_db() as conn:
                 words = conn.execute("SELECT * FROM dictionary").fetchall()
-            for w in words: st.write(f"📖 **{w['word']}**: {w['mean']}")
-            nw = st.text_input("用語")
-            nm = st.text_input("意味")
+           
+            for w in words:
+                c_del1, c_del2 = st.columns([4, 1])
+                c_del1.write(f"**{w['word']}**: {w['mean']}")
+                if c_del2.button("🗑️", key=f"del_{w['id']}"):
+                    with get_db() as conn:
+                        conn.execute("DELETE FROM dictionary WHERE id = ?", (w['id'],))
+                        conn.commit()
+                    st.rerun()
+           
+            st.divider()
+            st.write("### ➕ 新規登録")
+            nw = st.text_input("用語", placeholder="例：VAV")
+            nm = st.text_input("意味", placeholder="例：可変風量制御装置")
             if st.button("辞書登録"):
-                with get_db() as conn:
-                    conn.execute("INSERT INTO dictionary (word, mean) VALUES (?, ?)", (nw, nm))
-                    conn.commit()
-                st.rerun()
+                if nw.strip() and nm.strip(): # 空っぽじゃない時だけ登録
+                    with get_db() as conn:
+                        conn.execute("INSERT INTO dictionary (word, mean) VALUES (?, ?)", (nw, nm))
+                        conn.commit()
+                    st.success("登録したよ！")
+                    st.rerun()
+                else:
+                    st.warning("用語と意味の両方を入力してね")
 
     st.subheader("🆕 案件管理")
     with st.expander("➕ 新規案件を追加"):
@@ -155,7 +172,6 @@ with col1:
 with col2:
     tabs = st.tabs(["📊 手順書解析", "📝 議事録比較", "💎 マスター・相談", "⚠️ 事故DB"])
   
-    # タブ1: 手順書解析（ハイブリッド）
     with tabs[0]:
         st.subheader("🔍 手順書チェック")
         m_mode = st.radio("方法", ["PDF/画像アップ", "テキスト貼り付け"], horizontal=True)
@@ -176,7 +192,6 @@ with col2:
             if st.button("🚀 テキストで精査"):
                 with st.status("精査中..."): st.info(ask_ai([{"role":"system","content":sys_p},{"role":"user","content":txt}]))
 
-    # タブ2: 議事録比較（チェックボックス登録）
     with tabs[1]:
         st.subheader("📂 議事録の差分をマスターへ")
         f1, f2 = st.file_uploader("前回", type="pdf"), st.file_uploader("今回", type="pdf")
@@ -196,14 +211,12 @@ with col2:
                     conn.commit()
                 st.success("登録完了！")
 
-    # タブ3: マスター・相談
     with tabs[2]:
         st.subheader("💬 AI相談 & 現在のマスター")
         st.markdown(f"**現在の決定事項:**\n{p_data['master_content'] if p_data else 'なし'}")
         if prompt := st.chat_input("相談内容を入力..."):
             st.write(ask_ai([{"role":"system","content":f"マスター:{p_data['master_content']}"},{"role":"user","content":prompt}]))
 
-    # タブ4: 事故DB
     with tabs[3]:
         st.subheader("⚠️ 事故DB")
         acc_in = st.text_input("事例追加")
